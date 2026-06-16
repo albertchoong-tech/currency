@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Currency Exchange Rate Dashboard</title>
+<style>
+  :root{
+    --bg:#0b0f14;--surface:#131a22;--surface-2:#1a232d;--border:#243140;
+    --border-strong:#324356;--text:#e8eef5;--text-dim:#9fb0c0;--text-faint:#6b7c8d;
+    --accent:#4aa3ff;--accent-bg:rgba(74,163,255,0.14);
+    --up:#34d399;--up-bg:rgba(52,211,153,0.10);
+    --down:#f87171;--down-bg:rgba(248,113,113,0.10);
+    --radius:14px;--radius-sm:9px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1100px;margin:0 auto;padding:20px 16px 32px;}
+  header{display:flex;flex-direction:column;gap:4px;margin-bottom:18px;}
+  h1{margin:0;font-size:21px;font-weight:600;}
+  .sub{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--text-faint);}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--text-faint);}
+  .dot.live{background:var(--up);}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px;}
+  .ranges{display:flex;gap:6px;flex-wrap:wrap;}
+  .rbtn{background:var(--surface);color:var(--text-dim);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:7px 13px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;}
+  .rbtn:hover{border-color:var(--border-strong);color:var(--text);}
+  .rbtn.on{background:var(--accent-bg);border-color:var(--accent);color:var(--accent);}
+  .spacer{flex:1;}
+  .refresh{background:var(--surface);color:var(--text-dim);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:7px 13px;font-size:13px;font-weight:500;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:all .15s;}
+  .refresh:hover{border-color:var(--border-strong);color:var(--text);}
+  .refresh svg{width:14px;height:14px;}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 15px 12px;}
+  .card-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;}
+  .pair{font-size:14.5px;font-weight:600;}
+  .rate{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;}
+  .meta{font-size:11.5px;color:var(--text-faint);margin-bottom:10px;font-variant-numeric:tabular-nums;}
+  .meta .up{color:var(--up);}.meta .dn{color:var(--down);}
+  .canvas-box{position:relative;width:100%;height:150px;}
+  .note{font-size:12px;color:var(--text-faint);margin-top:16px;line-height:1.6;}
+  .err{color:var(--down);font-size:13px;margin-top:16px;}
+  @media(max-width:560px){
+    .grid{grid-template-columns:1fr;}
+    .canvas-box{height:130px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Currency Exchange Rate Dashboard</h1>
+    <div class="sub"><span id="dot" class="dot"></span><span id="status">Loading…</span></div>
+  </header>
+  <div class="controls">
+    <div class="ranges" id="ranges"></div>
+    <span class="spacer"></span>
+    <button class="refresh" id="refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      Refresh
+    </button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="note" id="note"></p>
+  <p class="err" id="err"></p>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+(function(){
+  // Pairs to display. Cross rates are computed from two USD-base pairs.
+  const PAIRS = [
+    {id:"USDJPY", base:"USD", quote:"JPY", dp:2},
+    {id:"USDMYR", base:"USD", quote:"MYR", dp:4},
+    {id:"GBPMYR", base:"GBP", quote:"MYR", dp:4, cross:{n:["USD","MYR"], d:["USD","GBP"]}},
+    {id:"SGDMYR", base:"SGD", quote:"MYR", dp:4, cross:{n:["USD","MYR"], d:["USD","SGD"]}},
+    {id:"MYRJPY", base:"MYR", quote:"JPY", dp:2, cross:{n:["USD","JPY"], d:["USD","MYR"]}},
+    {id:"MYRTHB", base:"MYR", quote:"THB", dp:4, cross:{n:["USD","THB"], d:["USD","MYR"]}}
+  ];
+
+  const RANGES=[
+    {label:"7D",days:7},{label:"1M",days:30},{label:"3M",days:90},
+    {label:"6M",days:180},{label:"1Y",days:365},{label:"5Y",days:1825}
+  ];
+
+  let activeDays = 30;
+  const chartObjs = {};
+  const cache = {};
+
+  const $=id=>document.getElementById(id);
+  const fmt=(v,dp)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:dp,maximumFractionDigits:dp});
+  const lbl=p=>p.base+"/"+p.quote;
+  const ymd=d=>{const s=d.toISOString().slice(0,10);return s;};
+
+  // Build range buttons
+  RANGES.forEach(r=>{
+    const b=document.createElement("button");
+    b.className="rbtn";b.textContent=r.label;b.dataset.days=r.days;
+    b.onclick=()=>{activeDays=r.days;styleRanges();renderAll();};
+    $("ranges").appendChild(b);
+  });
+  function styleRanges(){
+    [...$("ranges").children].forEach(b=>b.classList.toggle("on",+b.dataset.days===activeDays));
+  }
+
+  // Build cards
+  PAIRS.forEach(p=>{
+    const c=document.createElement("div");c.className="card";
+    c.innerHTML=`<div class="card-head"><span class="pair">${lbl(p)}</span><span class="rate" id="last_${p.id}">—</span></div>
+      <div class="meta" id="meta_${p.id}">&nbsp;</div>
+      <div class="canvas-box"><canvas id="cv_${p.id}"></canvas></div>`;
+    $("grid").appendChild(c);
+  });
+
+  // Fetch daily series from open.er-api.com (free, no key needed for latest)
+  // For history we use frankfurter.dev which supports free historical data
+  async function fetchSeries(base, quote, days){
+    const key=`${base}${quote}_${days}`;
+    if(cache[key]) return cache[key];
+
+    const end=new Date();
+    const start=new Date(); start.setDate(end.getDate()-days);
+    const s=ymd(start), e=ymd(end);
+
+    // Try frankfurter.dev
+    let res = await tryFrankfurter("https://api.frankfurter.dev/v1", base, quote, s, e);
+    if(!res) res = await tryFrankfurter("https://api.frankfurter.app", base, quote, s, e);
+
+    if(!res || res.length < 2) throw new Error(`No data for ${base}/${quote}`);
+    cache[key]=res;
+    return res;
+  }
+
+  async function tryFrankfurter(host, base, quote, s, e){
+    try{
+      // Frankfurter only handles EUR as base for some pairs; use USD as intermediary if needed
+      const url=`${host}/${s}..${e}?base=${base}&symbols=${quote}`;
+      const r=await fetch(url);
+      if(!r.ok) return null;
+      const j=await r.json();
+      if(!j.rates) return null;
+      return Object.keys(j.rates).sort().map(d=>({d, v:j.rates[d][quote]})).filter(o=>o.v!=null);
+    }catch(e){return null;}
+  }
+
+  async function getPairData(p){
+    if(!p.cross) return fetchSeries(p.base, p.quote, activeDays);
+
+    // Cross rate: numerator / denominator
+    const [nb,nq]=p.cross.n, [db,dq]=p.cross.d;
+    const [sn,sd]=await Promise.all([fetchSeries(nb,nq,activeDays), fetchSeries(db,dq,activeDays)]);
+    const map={}; sd.forEach(o=>map[o.d]=o.v);
+    return sn.filter(o=>map[o.d]!=null).map(o=>({d:o.d, v:o.v/map[o.d]}));
+  }
+
+  function drawCard(p, series){
+    const vals=series.map(o=>o.v), dates=series.map(o=>o.d);
+    const last=vals[vals.length-1], first=vals[0];
+    const chg=first?((last-first)/first*100):0;
+    const up=chg>=0;
+
+    $("last_"+p.id).textContent=fmt(last,p.dp);
+    $("meta_"+p.id).innerHTML=`<span class="${up?'up':'dn'}">${up?"▲":"▼"} ${Math.abs(chg).toFixed(2)}%</span>`+
+      ` &nbsp;H ${fmt(Math.max(...vals),p.dp)} &nbsp;L ${fmt(Math.min(...vals),p.dp)}`;
+
+    if(chartObjs[p.id]) chartObjs[p.id].destroy();
+    const color=up?"#34d399":"#f87171";
+    const fill=up?"rgba(52,211,153,0.10)":"rgba(248,113,113,0.10)";
+    // Crosshair + horizontal line plugin (per chart instance)
+    const crosshairPlugin={
+      id:"crosshair_"+p.id,
+      afterDraw(chart){
+        if(chart._hoverX==null) return;
+        const {ctx,chartArea:{top,bottom,left,right},scales:{x,y}}=chart;
+        const xi=chart._hoverX, yi=chart._hoverY;
+        ctx.save();
+        ctx.strokeStyle="rgba(255,255,255,0.22)";
+        ctx.lineWidth=1;
+        ctx.setLineDash([4,4]);
+        // Vertical line
+        ctx.beginPath();ctx.moveTo(xi,top);ctx.lineTo(xi,bottom);ctx.stroke();
+        // Horizontal line
+        ctx.beginPath();ctx.moveTo(left,yi);ctx.lineTo(right,yi);ctx.stroke();
+        // Rate label on Y axis
+        const val=y.getValueForPixel(yi);
+        const txt=fmt(val,p.dp);
+        ctx.setLineDash([]);
+        ctx.font="10px system-ui,sans-serif";
+        ctx.textAlign="right";ctx.textBaseline="middle";
+        const pad=4, tw=ctx.measureText(txt).width+pad*2, th=14;
+        ctx.fillStyle="rgba(30,40,52,0.92)";
+        ctx.fillRect(left-tw-2, yi-th/2, tw, th);
+        ctx.fillStyle="#e8eef5";
+        ctx.fillText(txt, left-pad-2, yi);
+        ctx.restore();
+      }
+    };
+    const el=$("cv_"+p.id);
+    el.onmousemove=e=>{
+      const ch=chartObjs[p.id]; if(!ch) return;
+      const rect=el.getBoundingClientRect();
+      ch._hoverX=e.clientX-rect.left;
+      ch._hoverY=e.clientY-rect.top;
+      ch.update("none");
+    };
+    el.onmouseleave=()=>{
+      const ch=chartObjs[p.id]; if(!ch) return;
+      ch._hoverX=null;ch._hoverY=null;ch.update("none");
+    };
+    chartObjs[p.id]=new Chart($("cv_"+p.id),{
+      plugins:[crosshairPlugin],
+      type:"line",
+      data:{labels:dates,datasets:[{data:vals,borderColor:color,backgroundColor:fill,
+        borderWidth:1.8,fill:true,pointRadius:0,tension:0.2}]},
+      options:{responsive:true,maintainAspectRatio:false,animation:false,
+        plugins:{
+          legend:{display:false},
+          tooltip:{
+            mode:"index",intersect:false,
+            callbacks:{label:c=>lbl(p)+" "+fmt(c.parsed.y,p.dp)}
+          },
+          crosshair:{color:"rgba(255,255,255,0.25)",width:1}
+        },
+        scales:{
+          x:{ticks:{maxTicksLimit:5,color:"#6b7c8d",font:{size:10}},grid:{display:false},border:{color:"#243140"}},
+          y:{ticks:{maxTicksLimit:5,color:"#6b7c8d",font:{size:10},callback:v=>fmt(v,p.dp)},
+             grid:{color:"rgba(36,49,64,0.5)"},border:{color:"#243140"}}
+        }}
+    });
+  }
+
+  async function renderAll(){
+    $("dot").classList.remove("live");
+    $("status").textContent="Loading…";
+    $("err").textContent="";
+    $("note").textContent="";
+
+    const label=RANGES.find(r=>r.days===activeDays)?.label||"";
+    $("status").textContent=`Fetching ${label} data…`;
+
+    const results=await Promise.allSettled(PAIRS.map(async p=>{
+      const s=await getPairData(p);
+      drawCard(p,s);
+    }));
+
+    const failed=results.filter(r=>r.status==="rejected");
+    if(failed.length===PAIRS.length){
+      $("status").textContent="Data unavailable";
+      $("err").textContent="⚠ Could not reach rate feed. Check your connection and tap Refresh.";
+    } else {
+      $("dot").classList.add("live");
+      $("status").textContent="Updated "+new Date().toLocaleTimeString();
+      $("note").textContent="Daily reference rates via Frankfurter (ECB data). MYR/JPY, MYR/THB, GBP/MYR and SGD/MYR are cross rates derived from USD pairs. % change is over the selected period.";
+      if(failed.length>0) $("err").textContent=`⚠ ${failed.length} pair(s) could not load.`;
+    }
+  }
+
+  $("refresh").onclick=()=>{Object.keys(cache).forEach(k=>delete cache[k]);renderAll();};
+
+  styleRanges();
+  renderAll();
+})();
+</script>
+</body>
+</html>
